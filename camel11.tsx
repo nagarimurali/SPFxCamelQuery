@@ -5,6 +5,7 @@ import { ListViewCommandSetContext, RowAccessor } from "@microsoft/sp-listview-e
 import { Logger } from "@pnp/logging";
 import strings from "ApplicableMenuCommandSetStrings";
 import { ListUrls } from "../../../constants";
+import { RenderListDataOptions } from "@pnp/sp/lists";
 
 const LOG_SOURCE: string = 'ApplicableMenuCommandSet';
 
@@ -99,33 +100,53 @@ class ConfirmationPopup extends React.Component<IWorkflowDialogContentProps, ICo
         this.hideDialog();
     }
 
-    // Search for files using SharePoint Search API
-    private searchFiles = async (fileLeafRefs: string[]): Promise<{ name: string; libraryName: string }[]> => {
+    // Helper method to check files in a library using CAML queries
+    private checkFilesInLibrary = async (
+        fileLeafRefs: string[],
+        libraryId: string,
+        libraryName: string
+    ): Promise<{ name: string; libraryName: string }[]> => {
         const sp = getSP();
-        const searchQuery = fileLeafRefs.map((fileLeafRef) => `FileLeafRef:${fileLeafRef}`).join(' OR ');
+        const foundLibraries: { name: string; libraryName: string }[] = [];
 
         try {
-            const results = await sp.search({
-                Querytext: searchQuery,
-                RowLimit: 100,
-                SelectProperties: ["FileLeafRef", "ListTitle"],
-            });
+            for (const fileLeafRef of fileLeafRefs) {
+                const camlQuery = `<View Scope="RecursiveAll">
+                    <Query>
+                        <Where>
+                            <Eq>
+                                <FieldRef Name="FileLeafRef" />
+                                <Value Type="Text">${fileLeafRef}</Value>
+                            </Eq>
+                        </Where>
+                    </Query>
+                </View>`;
 
-            return results.PrimarySearchResults.map((result) => ({
-                name: result.FileLeafRef,
-                libraryName: result.ListTitle,
-            }));
+                const listItems = await sp.web.lists
+                    .getById(libraryId)
+                    .renderListDataAsStream({
+                        ViewXml: camlQuery,
+                        RenderOptions: RenderListDataOptions.ListData,
+                    });
+
+                const itemCount = listItems?.Row?.length || 0;
+                if (itemCount > 0) {
+                    foundLibraries.push({ name: fileLeafRef, libraryName });
+                }
+            }
         } catch (error) {
-            console.error("Error searching for files:", error);
+            console.error(`Error checking files in ${libraryName}:`, error);
             Logger.error(new Error(`${LOG_SOURCE}: ${error}`));
-            return [];
         }
+
+        return foundLibraries;
     };
 
     private _changeDocumentStatusToApplicable = async (): Promise<void> => {
         this.setState({ isLoading: true, isError: false });
 
         const { fileLeafRefs, getSelection, getselectedId } = this.props;
+        const { applicableLibraryId, prevLibraryId } = this.state;
         const selectedRows = getSelection();
 
         if (!fileLeafRefs || fileLeafRefs.length === 0 || !selectedRows || selectedRows.length === 0) {
@@ -134,8 +155,19 @@ class ConfirmationPopup extends React.Component<IWorkflowDialogContentProps, ICo
         }
 
         try {
-            // Check for file existence using the Search API
-            const foundLibraries = await this.searchFiles(fileLeafRefs);
+            const foundLibraries: { name: string; libraryName: string }[] = [];
+
+            // Check for file existence in the Applicable Documents library
+            if (applicableLibraryId) {
+                const applicableResults = await this.checkFilesInLibrary(fileLeafRefs, applicableLibraryId, 'Applicable Documents Library');
+                foundLibraries.push(...applicableResults);
+            }
+
+            // Check for file existence in the Previous Versions library
+            if (prevLibraryId) {
+                const prevResults = await this.checkFilesInLibrary(fileLeafRefs, prevLibraryId, 'Previous Versions Library');
+                foundLibraries.push(...prevResults);
+            }
 
             if (foundLibraries.length > 0) {
                 // If files exist, show the details and stop further processing
