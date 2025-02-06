@@ -285,3 +285,51 @@ class ConfirmationPopup extends React.Component<IWorkflowDialogContentProps, ICo
 }
 
 export default ConfirmationPopup;
+##################################################################################################
+
+private checkFilesInLibrary = async (
+    fileLeafRefs: string[],
+    libraryId: string,
+    libraryName: string
+): Promise<{ name: string; libraryName: string }[]> => {
+    const sp = getSP();
+    const foundLibraries: { name: string; libraryName: string }[] = [];
+
+    try {
+        const chunkSize = 500;
+        for (let i = 0; i < fileLeafRefs.length; i += chunkSize) {
+            const chunk = fileLeafRefs.slice(i, i + chunkSize);
+            const values = chunk.map((fileLeafRef) => `<Value Type="Text">${fileLeafRef}</Value>`).join('');
+            const camlQuery = `<View Scope="RecursiveAll">
+                <Query>
+                    <Where>
+                        <In>
+                            <FieldRef Name="FileLeafRef" />
+                            <Values>
+                                ${values}
+                            </Values>
+                        </In>
+                    </Where>
+                </Query>
+            </View>`;
+
+            const listItems = await sp.web.lists
+                .getById(libraryId)
+                .renderListDataAsStream({
+                    ViewXml: camlQuery,
+                    RenderOptions: RenderListDataOptions.ListData,
+                });
+
+            if (listItems?.Row?.length > 0) {
+                listItems.Row.forEach((row: any) => {
+                    foundLibraries.push({ name: row.FileLeafRef, libraryName });
+                });
+            }
+        }
+    } catch (error) {
+        console.error(`Error checking files in ${libraryName}:`, error);
+        Logger.error(new Error(`${LOG_SOURCE}: ${error}`));
+    }
+
+    return foundLibraries;
+};
