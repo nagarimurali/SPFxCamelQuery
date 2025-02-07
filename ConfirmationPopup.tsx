@@ -393,3 +393,148 @@ private checkFilesInLibrary = async (
 
     return foundLibraries;
 };
+#######################################################################
+
+private checkFilesInLibrary = async (
+  fileLeafRefs: { fileLeafRef: string, projectRevision: string }[],
+  libraryId: string,
+  libraryName: string
+): Promise<{ name: string; libraryName: string }[]> => {
+  const sp = getSP();
+  const foundLibraries: { name: string; libraryName: string }[] = [];
+
+  try {
+    const chunkSize = 500;
+    for (let i = 0; i < fileLeafRefs.length; i += chunkSize) {
+      const chunk = fileLeafRefs.slice(i, i + chunkSize);
+      const values = chunk.map((file) => `<Value Type="Text">${file.fileLeafRef}</Value>`).join('');
+      const revisions = chunk.map((file) => `<Value Type="Text">${file.projectRevision}</Value>`).join('');
+
+      const camlQuery = `<View Scope="RecursiveAll">
+        <Query>
+          <Where>
+            <And>
+              <In>
+                <FieldRef Name="FileLeafRef" />
+                <Values>
+                  ${values}
+                </Values>
+              </In>
+              <In>
+                <FieldRef Name="ProjectRevision" />
+                <Values>
+                  ${revisions}
+                </Values>
+              </In>
+            </And>
+          </Where>
+        </Query>
+      </View>`;
+
+      const listItems = await sp.web.lists
+        .getById(libraryId)
+        .renderListDataAsStream({
+          ViewXml: camlQuery,
+          RenderOptions: RenderListDataOptions.ListData,
+        });
+
+      if (listItems?.Row?.length > 0) {
+        listItems.Row.forEach((row: any) => {
+          foundLibraries.push({ name: row.FileLeafRef, libraryName });
+        });
+      }
+    }
+  } catch (error) {
+    console.error(`Error checking files in ${libraryName}:`, error);
+    Logger.error(new Error(`${LOG_SOURCE}: ${error}`));
+  }
+
+  return foundLibraries;
+};
+####################################################################
+export interface IWorkflowDialogContentProps {
+  onClose: () => void;
+  onConfirm: () => void;
+  getSelection: () => readonly RowAccessor[] | undefined;
+  getselectedId: () => string | undefined;
+  fileLeafRefs: { fileLeafRef: string, projectRevision: string }[] | undefined;
+  context: ListViewCommandSetContext;
+}
+#######################################################################################
+private _changeDocumentStatusToApplicable = async (): Promise<void> => {
+  this.setState({ isLoading: true, isError: false });
+
+  const { fileLeafRefs, getSelection, getselectedId } = this.props;
+  const { applicableLibraryId, prevLibraryId } = this.state;
+  const selectedRows = getSelection();
+
+  if (!fileLeafRefs || fileLeafRefs.length === 0 || !selectedRows || selectedRows.length === 0) {
+    this.setState({ isLoading: false, isError: true });
+    return;
+  }
+
+  try {
+    const foundLibraries: { name: string; libraryName: string }[] = [];
+
+    // Check for file existence in the Applicable Documents library
+    if (applicableLibraryId) {
+      const applicableResults = await this.checkFilesInLibrary(fileLeafRefs, applicableLibraryId, 'Applicable Documents Library');
+      foundLibraries.push(...applicableResults);
+    }
+
+    // Check for file existence in the Previous Versions library
+    if (prevLibraryId) {
+      const prevResults = await this.checkFilesInLibrary(fileLeafRefs, prevLibraryId, 'Previous Versions Library');
+      foundLibraries.push(...prevResults);
+    }
+
+    if (foundLibraries.length > 0) {
+      // If files exist, show the details and stop further processing
+      this.setState({ isExistedItems: true, foundLibraries, checkItems: true, isLoading: false });
+      return;
+    }
+
+    // If no files exist, proceed to update the document status
+    const sp = getSP();
+    const [batch, execute] = sp.batched();
+    const result: { ref: string; rev: string; success: boolean }[] = [];
+
+    selectedRows.forEach((row) => {
+      try {
+        const documentStatusField = row.getValueByName("DocumentStatus");
+        const selected = getselectedId();
+        if (documentStatusField === "Draft" && selected) {
+          batch.web.lists
+            .getById(selected)
+            .items.getById(row.getValueByName("ID"))
+            .update({ DocumentStatus: "Applicable" })
+            .then((response) => {
+              result.push({
+                ref: row.getValueByName("ProjectReference"),
+                rev: row.getValueByName("ProjectRevision"),
+                success: true,
+              });
+            })
+            .catch((error) => {
+              console.error(error);
+              Logger.error(error);
+              result.push({
+                ref: row.getValueByName("ProjectReference"),
+                rev: row.getValueByName("ProjectRevision"),
+                success: false,
+              });
+            });
+        }
+      } catch (error) {
+        console.error("Error updating document status:", error);
+      }
+    });
+
+    await execute();
+    this.setState({ isLoading: false, result });
+  } catch (error) {
+    console.error("Error checking file existence:", error);
+    this.setState({ isLoading: false, isError: true });
+  }
+};
+###################################################
